@@ -1,13 +1,16 @@
 package org.cryptomator.ui.common;
 
 import javax.inject.Provider;
+import javafx.application.Platform;
 import javafx.fxml.FXMLLoader;
 import javafx.scene.Parent;
 import javafx.scene.Scene;
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.net.URL;
 import java.util.Map;
 import java.util.ResourceBundle;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 
 public class FxmlLoaderFactory {
@@ -48,7 +51,11 @@ public class FxmlLoaderFactory {
 	}
 
 	public Scene createScene(FxmlFile fxmlFile) {
-		return createScene(fxmlFile.getRessourcePathString());
+		if (true /*Boolean.getBoolean("fxdev")*/) {
+			return createSceneReloadable(fxmlFile.getRessourcePathString());
+		} else {
+			return createScene(fxmlFile.getRessourcePathString());
+		}
 	}
 
 	/**
@@ -76,6 +83,51 @@ public class FxmlLoaderFactory {
 			throw new IllegalArgumentException("ViewController not registered: " + aClass);
 		} else {
 			return controllerFactories.get(aClass).get();
+		}
+	}
+
+	private Scene createSceneReloadable(String fxmlResourceName) {
+		URL url = getClass().getResource(fxmlResourceName);
+		if (url == null) {
+			throw new IllegalArgumentException("Missing FXML: " + fxmlResourceName);
+		}
+
+		Parent root = loadRoot(url);
+		Scene scene = sceneFactory.apply(root);
+
+		FxDev.hookSceneStyles(scene);
+
+		java.util.concurrent.ScheduledExecutorService ses =
+				java.util.concurrent.Executors.newSingleThreadScheduledExecutor(r -> { var t = new Thread(r, "fxdev-debounce"); t.setDaemon(true); return t; });
+		java.util.concurrent.atomic.AtomicBoolean pending = new java.util.concurrent.atomic.AtomicBoolean(false);
+		AtomicReference<Runnable> onChangeRef = new AtomicReference<>();
+		Runnable onChange = () -> {
+			if (pending.getAndSet(true)) {
+				return;
+			}
+			ses.schedule(() -> Platform.runLater(() -> {
+				Parent fresh = loadRoot(url);
+				if (fresh != null) {
+					scene.setRoot(fresh);
+					FxDev.watchFxmlGraph(url, onChangeRef.get());
+				}
+				pending.set(false);
+			}), 150, java.util.concurrent.TimeUnit.MILLISECONDS);
+		};
+
+		onChangeRef.set(onChange);
+		FxDev.watchFxmlGraph(url, onChange);
+		return scene;
+	}
+
+	private Parent loadRoot(URL url) {
+		try {
+			FXMLLoader l = new FXMLLoader(url, resourceBundle, null, this::constructController);
+			l.load();
+			return l.getRoot();
+		} catch (IOException e) {
+			e.printStackTrace();
+			return null;
 		}
 	}
 }
